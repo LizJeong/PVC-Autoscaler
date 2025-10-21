@@ -41,6 +41,7 @@ PROMETHEUS_VERSION = "0.0.0"                                                    
 VERBOSE = True if getenv('VERBOSE', "false").lower() == "true" else False        # If we want to verbose mode
 VICTORIAMETRICS_COMPAT = True if getenv('VICTORIAMETRICS_MODE', "false").lower() == "true" else False # Whether to skip the prometheus check and assume victoriametrics
 SCOPE_ORGID_AUTH_HEADER = getenv('SCOPE_ORGID_AUTH_HEADER') or ''                # If we want to use Mimir or AgentMode which requires an orgid header.  See: https://grafana.com/docs/mimir/latest/references/http-api/#authentication
+USE_GCP_AUTH = True if getenv('USE_GCP_AUTH', "false").lower() == "true" else False  # If we want to use GCP Workload Identity for authentication
 
 
 # Simple helper to pass back
@@ -62,10 +63,38 @@ def get_settings_for_prometheus_metrics():
         'verbose_enabled': "true" if VERBOSE else "false",
     }
 
-# Set headers if desired from above
-headers = {}
-if len(SCOPE_ORGID_AUTH_HEADER) > 0:
-    headers['X-Scope-OrgID'] = SCOPE_ORGID_AUTH_HEADER
+# Function to get GCP access token from metadata server
+def get_gcp_access_token():
+    try:
+        metadata_server = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+        headers = {"Metadata-Flavor": "Google"}
+        response = requests.get(metadata_server, headers=headers, timeout=5)
+        if response.status_code == 200:
+            return response.json()['access_token']
+        else:
+            print(f"Failed to get GCP access token: status code {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Exception while getting GCP access token: {e}")
+        return None
+
+# Function to generate headers dynamically for Prometheus requests
+def get_prometheus_headers():
+    headers = {}
+    
+    # Add X-Scope-OrgID header for Mimir/Cortex if configured
+    if len(SCOPE_ORGID_AUTH_HEADER) > 0:
+        headers['X-Scope-OrgID'] = SCOPE_ORGID_AUTH_HEADER
+    
+    # Add GCP Bearer token if GCP auth is enabled
+    if USE_GCP_AUTH:
+        token = get_gcp_access_token()
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        else:
+            print("WARNING: USE_GCP_AUTH is enabled but failed to get access token")
+    
+    return headers
 
 # This handler helps handle sigint/term gracefully (not in the middle of an runloop)
 class GracefulKiller:
@@ -150,6 +179,7 @@ def printHeaderAndConfiguration():
     print("     HTTP Timeouts for k8s/prom: {} seconds".format(HTTP_TIMEOUT))
     print("           VictoriaMetrics mode: {}".format("ENABLED" if VICTORIAMETRICS_COMPAT else "disabled"))
     print("X-Scope-OrgID Header for Cortex: {}".format(SCOPE_ORGID_AUTH_HEADER if len(SCOPE_ORGID_AUTH_HEADER) else "disabled"))
+    print("            GCP Authentication: {}".format("ENABLED" if USE_GCP_AUTH else "disabled"))
     print(" Sending notifications to Slack: {}".format("ENABLED" if len(slack.SLACK_WEBHOOK_URL) > 0 else "disabled"))
     if len(slack.SLACK_WEBHOOK_URL) > 0:
         print("                  Slack channel: {}".format(slack.SLACK_CHANNEL))
@@ -461,7 +491,7 @@ def testIfPrometheusIsAccessible(url):
       return # Victoria doesn't export stats/buildinfo endpoint, so just assume it's accessible.
 
     try:
-        response = requests.get(url + '/api/v1/status/buildinfo', timeout=HTTP_TIMEOUT, headers=headers)
+        response = requests.get(url + '/api/v1/status/buildinfo', timeout=HTTP_TIMEOUT, headers=get_prometheus_headers())
         if response.status_code != 200:
             raise Exception("ERROR: Received status code {} while trying to initialize on Prometheus: {}".format(response.status_code, url))
         response_object = response.json()
@@ -477,9 +507,9 @@ def fetch_pvcs_from_prometheus(url, label_match=PROMETHEUS_LABEL_MATCH):
 
     # This only works on Prometheus v2.30.0 or newer, using this helps prevent false-negatives only returning recent pvcs (in the last hour)
     if version.parse(PROMETHEUS_VERSION) >= version.parse("2.30.0"):
-        response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_available_bytes{{ {} }} / kubelet_volume_stats_capacity_bytes)*100) and present_over_time(kubelet_volume_stats_available_bytes{{ {} }}[1h])".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=headers)
+        response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_available_bytes{{ {} }} / kubelet_volume_stats_capacity_bytes)*100) and present_over_time(kubelet_volume_stats_available_bytes{{ {} }}[1h])".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=get_prometheus_headers())
     else:
-        response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_available_bytes{{ {} }} / kubelet_volume_stats_capacity_bytes)*100)".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=headers)
+        response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_available_bytes{{ {} }} / kubelet_volume_stats_capacity_bytes)*100)".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=get_prometheus_headers())
 
     response_object = response.json()
 
@@ -492,9 +522,9 @@ def fetch_pvcs_from_prometheus(url, label_match=PROMETHEUS_LABEL_MATCH):
     #TODO: Inject here "trying" to get inode percentage usage also
     try:
         if version.parse(PROMETHEUS_VERSION) >= version.parse("2.30.0"):
-            inodes_response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_inodes_free{{ {} }} / kubelet_volume_stats_inodes)*100) and present_over_time(kubelet_volume_stats_inodes_free{{ {} }}[1h])".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=headers)
+            inodes_response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_inodes_free{{ {} }} / kubelet_volume_stats_inodes)*100) and present_over_time(kubelet_volume_stats_inodes_free{{ {} }}[1h])".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=get_prometheus_headers())
         else:
-            inodes_response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_inodes_free{{ {} }} / kubelet_volume_stats_inodes)*100)".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=headers)
+            inodes_response = requests.get(url + '/api/v1/query', params={'query': "ceil((1 - kubelet_volume_stats_inodes_free{{ {} }} / kubelet_volume_stats_inodes)*100)".format(label_match,label_match)}, timeout=HTTP_TIMEOUT, headers=get_prometheus_headers())
         inodes_response_object = inodes_response.json()
 
         # Prepare values to merge/inject with our first response_object list/array above
