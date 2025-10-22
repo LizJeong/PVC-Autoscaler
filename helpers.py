@@ -457,16 +457,19 @@ def describe_all_pvcs(simple=False):
 # Scale up an PVC in Kubernetes
 def scale_up_pvc(namespace, name, new_size):
     try:
+        # Convert bytes to Gi storage format (e.g., 6Gi, 10G)
+        new_size_formatted = convert_bytes_to_storage(new_size)
+        
         result = kubernetes_core_api.patch_namespaced_persistent_volume_claim(
                     name=name,
                     namespace=namespace,
                     body={
                         "metadata": {"annotations": {"volume.autoscaler.kubernetes.io/last-resized-at": str(int(time.mktime(time.gmtime())))}},
-                        "spec": {"resources": {"requests": {"storage": new_size}} }
+                        "spec": {"resources": {"requests": {"storage": new_size_formatted}} }
                     }
                 )
 
-        print("  Desired New Size: {}".format(new_size))
+        print("  Desired New Size: {} ({})".format(new_size, new_size_formatted))
         print("  Actual New Size: {}".format(convert_storage_to_bytes(result.spec.resources.requests['storage'])))
 
         # If the new size is within' 10% of the desired size.  This is necessary because of the megabyte/mebibyte issue
