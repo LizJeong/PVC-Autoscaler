@@ -8,19 +8,13 @@ from prometheus_client import start_http_server, Summary, Gauge, Counter, Info
 import slack
 import sys, traceback
 
-# Initialize our Prometheus metrics
+# Initialize our Prometheus metrics (minimal)
 PROMETHEUS_METRICS = {}
-# PVC-specific metrics
-PROMETHEUS_METRICS['resize_by_pvc'] = Counter('volume_autoscaler_resize_by_pvc_total', 'PVC resize operations', ['namespace', 'pvc', 'status'])
-PROMETHEUS_METRICS['pvc_size_bytes'] = Gauge('volume_autoscaler_pvc_size_bytes', 'PVC size after resize', ['namespace', 'pvc'])
-# Cluster-wide metrics
-PROMETHEUS_METRICS['num_valid_pvcs'] = Gauge('volume_autoscaler_num_valid_pvcs', 'Number of monitored PVCs')
-PROMETHEUS_METRICS['num_pvcs_above_threshold'] = Gauge('volume_autoscaler_num_pvcs_above_threshold', 'Number of PVCs above threshold')
-# Info
-PROMETHEUS_METRICS['info'] = Info('volume_autoscaler_release', 'Version information')
-PROMETHEUS_METRICS['info'].info({'version': '2.0.2'})
-PROMETHEUS_METRICS['settings'] = Info('volume_autoscaler_settings', 'Current settings')
-PROMETHEUS_METRICS['settings'].info(get_settings_for_prometheus_metrics())
+PROMETHEUS_METRICS['resize_by_pvc'] = Counter(
+    'volume_autoscaler_resize_by_pvc_total',
+    'PVC resize operations with size details',
+    ['namespace', 'pvc', 'status', 'old_size_gb', 'new_size_gb']
+)
 
 # Other globals
 MAIN_LOOP_TIME = 1
@@ -65,7 +59,6 @@ if __name__ == "__main__":
         try:
             pvcs_in_prometheus = fetch_pvcs_from_prometheus(url=PROMETHEUS_URL)
             print("Querying and found {} valid PVCs to assess in prometheus".format(len(pvcs_in_prometheus)))
-            PROMETHEUS_METRICS['num_valid_pvcs'].set(len(pvcs_in_prometheus))
         except Exception:
             print("Exception while trying to fetch PVC metrics from prometheus")
             traceback.print_exc()
@@ -73,7 +66,6 @@ if __name__ == "__main__":
             continue
 
         # Iterate through every item and handle it accordingly
-        PROMETHEUS_METRICS['num_pvcs_above_threshold'].set(0)  # Reset each loop
         for item in pvcs_in_prometheus:
             try:
                 volume_name = str(item['metric']['persistentvolumeclaim'])
@@ -112,8 +104,6 @@ if __name__ == "__main__":
                     if VERBOSE:
                         print("=============================================================================================================")
                     continue
-                else:
-                    PROMETHEUS_METRICS['num_pvcs_above_threshold'].inc()
 
                 # If we are in alert condition, record this in our simple in-memory counter
                 if cache.get(volume_description):
@@ -226,9 +216,16 @@ if __name__ == "__main__":
                 )
 
                 if scale_up_pvc(volume_namespace, volume_name, resize_to_bytes):
-                    # Record success with PVC labels
-                    PROMETHEUS_METRICS['resize_by_pvc'].labels(namespace=volume_namespace, pvc=volume_name, status='success').inc()
-                    PROMETHEUS_METRICS['pvc_size_bytes'].labels(namespace=volume_namespace, pvc=volume_name).set(resize_to_bytes)
+                    # Record success with PVC labels including size info
+                    old_size_gb = str(int(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes'] / 1073741824))
+                    new_size_gb = str(int(resize_to_bytes / 1073741824))
+                    PROMETHEUS_METRICS['resize_by_pvc'].labels(
+                        namespace=volume_namespace,
+                        pvc=volume_name,
+                        status='success',
+                        old_size_gb=old_size_gb,
+                        new_size_gb=new_size_gb
+                    ).inc()
                     # Save this to cache for debouncing
                     cache.set(f"{volume_description}-has-been-resized", True)
                     # Print success to console
@@ -240,8 +237,16 @@ if __name__ == "__main__":
                         print(f"Sending slack message to {slack.SLACK_CHANNEL}")
                         slack.send(status_output)
                 else:
-                    # Record failure with PVC labels
-                    PROMETHEUS_METRICS['resize_by_pvc'].labels(namespace=volume_namespace, pvc=volume_name, status='failure').inc()
+                    # Record failure with PVC labels including size info
+                    old_size_gb = str(int(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes'] / 1073741824))
+                    new_size_gb = str(int(resize_to_bytes / 1073741824))
+                    PROMETHEUS_METRICS['resize_by_pvc'].labels(
+                        namespace=volume_namespace,
+                        pvc=volume_name,
+                        status='failure',
+                        old_size_gb=old_size_gb,
+                        new_size_gb=new_size_gb
+                    ).inc()
                     # Print failure to console
                     status_output = "FAILED requesting {}".format(status_output)
                     print(status_output)
