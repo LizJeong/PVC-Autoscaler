@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import time
-from helpers import INTERVAL_TIME, PROMETHEUS_URL, DRY_RUN, VERBOSE, get_settings_for_prometheus_metrics, is_integer_or_float, print_human_readable_volume_dict
+from helpers import INTERVAL_TIME, PROMETHEUS_URL, DRY_RUN, DRY_RUN_SLACK_NOTIFY, VERBOSE, get_settings_for_prometheus_metrics, is_integer_or_float, print_human_readable_volume_dict
 from helpers import convert_bytes_to_storage, scale_up_pvc, testIfPrometheusIsAccessible, describe_all_pvcs, send_kubernetes_event
 from helpers import fetch_pvcs_from_prometheus, printHeaderAndConfiguration, calculateBytesToScaleTo, GracefulKiller, cache
 from prometheus_client import start_http_server, Summary, Gauge, Counter, Info
@@ -193,14 +193,7 @@ if __name__ == "__main__":
                     print("=============================================================================================================")
                     continue
 
-                # Check if we are DRY-RUN-ing and won't do anything
-                if DRY_RUN:
-                    print("  DRY RUN was set, but we would have resized this disk from {} to {}".format(convert_bytes_to_storage(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes']), convert_bytes_to_storage(resize_to_bytes)))
-                    print("=============================================================================================================")
-                    continue
-
-                # If we aren't dry-run, lets resize
-                print("  RESIZING disk from {} to {}".format(convert_bytes_to_storage(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes']), convert_bytes_to_storage(resize_to_bytes)))
+                # Prepare status message
                 status_output = "to scale up `{}` by `{}%` from `{}` to `{}`, it was using more than `{}%` disk or inode space over the last `{} seconds`".format(
                     volume_description,
                     pvcs_in_kubernetes[volume_description]['scale_up_percent'],
@@ -209,6 +202,19 @@ if __name__ == "__main__":
                     pvcs_in_kubernetes[volume_description]['scale_above_percent'],
                     cache.get(volume_description) * INTERVAL_TIME
                 )
+
+                # Check if we are DRY-RUN-ing and won't do anything
+                if DRY_RUN:
+                    print("  DRY RUN was set, but we would have resized this disk from {} to {}".format(convert_bytes_to_storage(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes']), convert_bytes_to_storage(resize_to_bytes)))
+                    # Send Slack notification if DRY_RUN_SLACK_NOTIFY is enabled
+                    if DRY_RUN_SLACK_NOTIFY and slack.SLACK_WEBHOOK_URL and len(slack.SLACK_WEBHOOK_URL) > 0:
+                        print(f"Sending slack message to {slack.SLACK_CHANNEL}")
+                        slack.send("[DRY_RUN] Would have " + status_output)
+                    print("=============================================================================================================")
+                    continue
+
+                # If we aren't dry-run, lets resize
+                print("  RESIZING disk from {} to {}".format(convert_bytes_to_storage(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes']), convert_bytes_to_storage(resize_to_bytes)))
                 # Send event that we're starting to request a resize
                 send_kubernetes_event(
                     name=volume_name, namespace=volume_namespace, reason="VolumeResizeRequested",
