@@ -12,8 +12,8 @@ import sys, traceback
 PROMETHEUS_METRICS = {}
 PROMETHEUS_METRICS['resize_by_pvc'] = Counter(
     'volume_autoscaler_resize_by_pvc_total',
-    'PVC resize operations with size details',
-    ['namespace', 'pvc', 'status', 'old_size', 'new_size']
+    'PVC resize operations',
+    ['namespace', 'pvc', 'status']
 )
 
 # Other globals
@@ -216,15 +216,11 @@ if __name__ == "__main__":
                 )
 
                 if scale_up_pvc(volume_namespace, volume_name, resize_to_bytes):
-                    # Record success with PVC labels including actual size info
-                    old_size = convert_bytes_to_storage(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes'])
-                    new_size = convert_bytes_to_storage(resize_to_bytes)
+                    # Record success metric (size info in Slack/logs/events)
                     PROMETHEUS_METRICS['resize_by_pvc'].labels(
                         namespace=volume_namespace,
                         pvc=volume_name,
-                        status='success',
-                        old_size=old_size,
-                        new_size=new_size
+                        status='success'
                     ).inc()
                     # Save this to cache for debouncing
                     cache.set(f"{volume_description}-has-been-resized", True)
@@ -237,15 +233,11 @@ if __name__ == "__main__":
                         print(f"Sending slack message to {slack.SLACK_CHANNEL}")
                         slack.send(status_output)
                 else:
-                    # Record failure with PVC labels including actual size info
-                    old_size = convert_bytes_to_storage(pvcs_in_kubernetes[volume_description]['volume_size_status_bytes'])
-                    new_size = convert_bytes_to_storage(resize_to_bytes)
+                    # Record failure metric (size info in Slack/logs/events)
                     PROMETHEUS_METRICS['resize_by_pvc'].labels(
                         namespace=volume_namespace,
                         pvc=volume_name,
-                        status='failure',
-                        old_size=old_size,
-                        new_size=new_size
+                        status='failure'
                     ).inc()
                     # Print failure to console
                     status_output = "FAILED requesting {}".format(status_output)
